@@ -1,0 +1,42 @@
+tsdf_only_node:
+  ros__parameters:
+    use_sim_time: true
+
+    depth_topic: /head_front_left_color_depth
+    mask_topic: /head_front_left_color_robot_mask
+    tf_topic: /tf
+    tsdf_output_topic: /nvblox_tsdf/surface_points
+
+    world_frame: world
+    camera_frame: head_front_left_color
+
+    width: 640
+    height: 480
+    fx: 211.2
+    fy: 211.2
+    cx: 291.19999872
+    cy: 240.0
+
+    depth_min_m: 0.1
+    depth_max_m: 10.0
+    depth_scale: 0.001
+    mask_robot_threshold: 0
+
+    voxel_size_m: 0.05
+    truncation_distance_vox: 4.0
+    max_weight: 20.0
+    max_integration_distance_m: 10.0
+
+    min_visualization_weight: 1.0
+    surface_visualization_distance_vox: 1.0
+    publish_period_sec: 1.0
+
+    input_queue_size: 30
+    output_queue_size: 1
+    sync_queue_size: 30
+    pending_frame_limit: 120
+    max_image_stamp_delta_sec: 0.002
+    tf_buffer_duration_sec: 5.0
+    max_tf_gap_sec: 0.2
+    max_tf_translation_step_m: 0.5
+    max_tf_rotation_step_deg: 45.0
