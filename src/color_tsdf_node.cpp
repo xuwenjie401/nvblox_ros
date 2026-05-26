@@ -58,6 +58,22 @@ bool isMaskEncoding(const std::string& encoding) {
          encoding == sensor_msgs::image_encodings::TYPE_8UC1;
 }
 
+bool isColorEncoding(const std::string& encoding) {
+  return encoding == sensor_msgs::image_encodings::RGB8 ||
+         encoding == sensor_msgs::image_encodings::BGR8 ||
+         encoding == sensor_msgs::image_encodings::RGBA8 ||
+         encoding == sensor_msgs::image_encodings::BGRA8;
+}
+
+float packRgbAsFloat(const nvblox::Color& color) {
+  const uint32_t packed = (static_cast<uint32_t>(color.r()) << 16U) |
+                          (static_cast<uint32_t>(color.g()) << 8U) |
+                          static_cast<uint32_t>(color.b());
+  float value;
+  std::memcpy(&value, &packed, sizeof(value));
+  return value;
+}
+
 std::string normalizeFrame(std::string frame) {
   while (!frame.empty() && frame.front() == '/') {
     frame.erase(frame.begin());
@@ -146,10 +162,10 @@ std::string resolveMapFilePath(const std::string& path_string,
 
 }  // namespace
 
-class TsdfOnlyNode : public rclcpp::Node {
+class ColorTsdfNode : public rclcpp::Node {
  public:
-  explicit TsdfOnlyNode(const rclcpp::NodeOptions& options)
-      : Node("tsdf_only_node", options), config_(loadConfig()) {
+  explicit ColorTsdfNode(const rclcpp::NodeOptions& options)
+      : Node("color_tsdf_node", options), config_(loadConfig()) {
     mapper_ = createMapper();
     mapper_->tsdf_integrator().max_integration_distance_m(
         config_.max_integration_distance_m);
@@ -166,16 +182,19 @@ class TsdfOnlyNode : public rclcpp::Node {
                          input_qos.get_rmw_qos_profile());
     mask_sub_.subscribe(this, config_.mask_topic,
                         input_qos.get_rmw_qos_profile());
+    color_sub_.subscribe(this, config_.color_topic,
+                         input_qos.get_rmw_qos_profile());
     sync_ = std::make_unique<Sync>(
         SyncPolicy(static_cast<uint32_t>(config_.sync_queue_size)), depth_sub_,
-        mask_sub_);
-    sync_->registerCallback(std::bind(&TsdfOnlyNode::handleImages, this,
+        mask_sub_, color_sub_);
+    sync_->registerCallback(std::bind(&ColorTsdfNode::handleImages, this,
                                       std::placeholders::_1,
-                                      std::placeholders::_2));
+                                      std::placeholders::_2,
+                                      std::placeholders::_3));
 
     tf_sub_ = create_subscription<tf2_msgs::msg::TFMessage>(
         config_.tf_topic, input_qos,
-        std::bind(&TsdfOnlyNode::handleTf, this, std::placeholders::_1));
+        std::bind(&ColorTsdfNode::handleTf, this, std::placeholders::_1));
 
     tsdf_pub_ = create_publisher<PointCloud2>(
         config_.tsdf_output_topic,
@@ -185,17 +204,18 @@ class TsdfOnlyNode : public rclcpp::Node {
         std::chrono::nanoseconds>(
         std::chrono::duration<double>(config_.publish_period_sec));
     publish_timer_ = create_wall_timer(
-        publish_period, std::bind(&TsdfOnlyNode::publishTsdfSurface, this));
+        publish_period, std::bind(&ColorTsdfNode::publishTsdfSurface, this));
 
     RCLCPP_INFO(
         get_logger(),
-        "nvblox TSDF-only mapping %s + %s + %s -> %s, frame %s, voxel %.3f m",
+        "nvblox color TSDF mapping %s + %s + %s + %s -> %s, frame %s, voxel %.3f m",
         config_.depth_topic.c_str(), config_.mask_topic.c_str(),
-        config_.tf_topic.c_str(), config_.tsdf_output_topic.c_str(),
-        config_.world_frame.c_str(), config_.voxel_size_m);
+        config_.color_topic.c_str(), config_.tf_topic.c_str(),
+        config_.tsdf_output_topic.c_str(), config_.world_frame.c_str(),
+        config_.voxel_size_m);
   }
 
-  ~TsdfOnlyNode() override { saveMapIfRequested(); }
+  ~ColorTsdfNode() override { saveMapIfRequested(); }
 
   void saveMapIfRequested() {
     if (!config_.save_map || map_saved_) {
@@ -216,7 +236,7 @@ class TsdfOnlyNode : public rclcpp::Node {
     }
 
     const std::string map_save_path =
-        resolveMapFilePath(config_.map_save_path, "tsdf_map.nvblox", true,
+        resolveMapFilePath(config_.map_save_path, "color_tsdf_map.nvblox", true,
                            true);
     if (mapper_->saveLayerCake(map_save_path)) {
       map_saved_ = true;
@@ -229,14 +249,16 @@ class TsdfOnlyNode : public rclcpp::Node {
   }
 
  private:
-  using SyncPolicy = message_filters::sync_policies::ApproximateTime<Image, Image>;
+  using SyncPolicy =
+      message_filters::sync_policies::ApproximateTime<Image, Image, Image>;
   using Sync = message_filters::Synchronizer<SyncPolicy>;
 
   struct Config {
     std::string depth_topic = "/head_front_left_color_depth";
     std::string mask_topic = "/head_front_left_color_robot_mask";
+    std::string color_topic = "/head_front_left_color_rgb";
     std::string tf_topic = "/tf";
-    std::string tsdf_output_topic = "/nvblox_tsdf/surface_points";
+    std::string tsdf_output_topic = "/nvblox_color_tsdf/surface_points";
     std::string world_frame = "world";
     std::string camera_frame = "head_front_left_color";
 
@@ -258,6 +280,7 @@ class TsdfOnlyNode : public rclcpp::Node {
     float max_integration_distance_m = 10.0f;
 
     float min_visualization_weight = 1.0f;
+    float min_color_weight = 0.1f;
     float surface_visualization_distance_vox = 1.0f;
     double publish_period_sec = 1.0;
 
@@ -288,6 +311,7 @@ class TsdfOnlyNode : public rclcpp::Node {
   struct PendingFrame {
     Image::ConstSharedPtr depth;
     Image::ConstSharedPtr mask;
+    Image::ConstSharedPtr color;
   };
 
   enum class PoseStatus {
@@ -313,6 +337,8 @@ class TsdfOnlyNode : public rclcpp::Node {
     float x = 0.0f;
     float y = 0.0f;
     float z = 0.0f;
+    nvblox::Color color = nvblox::Color::Gray();
+    float color_weight = 0.0f;
     float distance = 0.0f;
     float weight = 0.0f;
   };
@@ -323,6 +349,8 @@ class TsdfOnlyNode : public rclcpp::Node {
         declare_parameter<std::string>("depth_topic", config.depth_topic);
     config.mask_topic =
         declare_parameter<std::string>("mask_topic", config.mask_topic);
+    config.color_topic =
+        declare_parameter<std::string>("color_topic", config.color_topic);
     config.tf_topic = declare_parameter<std::string>("tf_topic", config.tf_topic);
     config.tsdf_output_topic = declare_parameter<std::string>(
         "tsdf_output_topic", config.tsdf_output_topic);
@@ -374,6 +402,9 @@ class TsdfOnlyNode : public rclcpp::Node {
         declare_parameter<double>("min_visualization_weight",
                                   config.min_visualization_weight),
         config.min_visualization_weight);
+    config.min_color_weight = positiveOrDefault(
+        declare_parameter<double>("min_color_weight", config.min_color_weight),
+        config.min_color_weight);
     config.surface_visualization_distance_vox = positiveOrDefault(
         declare_parameter<double>("surface_visualization_distance_vox",
                                   config.surface_visualization_distance_vox),
@@ -429,7 +460,8 @@ class TsdfOnlyNode : public rclcpp::Node {
       return mapper;
     }
     const std::string map_load_path =
-        resolveMapFilePath(config_.map_load_path, "tsdf_map.nvblox", false);
+        resolveMapFilePath(config_.map_load_path, "color_tsdf_map.nvblox",
+                           false);
     if (mapper->loadMap(map_load_path,
                         nvblox::BlockMemoryPoolParams(
                             nvblox::MemoryType::kUnified))) {
@@ -449,13 +481,14 @@ class TsdfOnlyNode : public rclcpp::Node {
   }
 
   void handleImages(const Image::ConstSharedPtr& depth_msg,
-                    const Image::ConstSharedPtr& mask_msg) {
-    if (!validateImages(*depth_msg, *mask_msg) ||
-        !validateImageStamps(*depth_msg, *mask_msg)) {
+                    const Image::ConstSharedPtr& mask_msg,
+                    const Image::ConstSharedPtr& color_msg) {
+    if (!validateImages(*depth_msg, *mask_msg, *color_msg) ||
+        !validateImageStamps(*depth_msg, *mask_msg, *color_msg)) {
       return;
     }
 
-    pending_frames_.push_back(PendingFrame{depth_msg, mask_msg});
+    pending_frames_.push_back(PendingFrame{depth_msg, mask_msg, color_msg});
     while (static_cast<int>(pending_frames_.size()) >
            config_.pending_frame_limit) {
       RCLCPP_WARN_THROTTLE(
@@ -497,10 +530,11 @@ class TsdfOnlyNode : public rclcpp::Node {
     }
   }
 
-  bool validateImages(const Image& depth, const Image& mask) {
-    if (depth.data.empty() || mask.data.empty()) {
+  bool validateImages(const Image& depth, const Image& mask,
+                      const Image& color) {
+    if (depth.data.empty() || mask.data.empty() || color.data.empty()) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-                           "received an empty depth or mask image");
+                           "received an empty depth, mask, or color image");
       return false;
     }
     if (!isDepthEncoding(depth.encoding)) {
@@ -517,14 +551,22 @@ class TsdfOnlyNode : public rclcpp::Node {
           mask.encoding.c_str());
       return false;
     }
-    if (depth.is_bigendian || mask.is_bigendian) {
+    if (!isColorEncoding(color.encoding)) {
+      RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 2000,
+          "color image must use rgb8/bgr8/rgba8/bgra8 encoding, got '%s'",
+          color.encoding.c_str());
+      return false;
+    }
+    if (depth.is_bigendian || mask.is_bigendian || color.is_bigendian) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
                            "big-endian image buffers are not supported");
       return false;
     }
-    if (depth.height != mask.height || depth.width != mask.width) {
+    if (depth.height != mask.height || depth.width != mask.width ||
+        depth.height != color.height || depth.width != color.width) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-                           "depth and mask image sizes do not match");
+                           "depth, mask, and color image sizes do not match");
       return false;
     }
 
@@ -532,28 +574,43 @@ class TsdfOnlyNode : public rclcpp::Node {
         depth.encoding == sensor_msgs::image_encodings::TYPE_32FC1
             ? sizeof(float)
             : sizeof(uint16_t);
+    const size_t color_channels =
+        color.encoding == sensor_msgs::image_encodings::RGB8 ||
+                color.encoding == sensor_msgs::image_encodings::BGR8
+            ? 3U
+            : 4U;
     const size_t depth_min_step =
         static_cast<size_t>(depth.width) * depth_pixel_size;
     const size_t mask_min_step = static_cast<size_t>(mask.width);
+    const size_t color_min_step =
+        static_cast<size_t>(color.width) * color_channels;
     if (depth.step < depth_min_step || mask.step < mask_min_step ||
+        color.step < color_min_step ||
         depth.data.size() < static_cast<size_t>(depth.step) * depth.height ||
-        mask.data.size() < static_cast<size_t>(mask.step) * mask.height) {
+        mask.data.size() < static_cast<size_t>(mask.step) * mask.height ||
+        color.data.size() < static_cast<size_t>(color.step) * color.height) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-                           "depth or mask image buffer is too small");
+                           "depth, mask, or color image buffer is too small");
       return false;
     }
     return true;
   }
 
-  bool validateImageStamps(const Image& depth, const Image& mask) {
-    const double delta = stampDeltaSec(depth.header.stamp, mask.header.stamp);
-    if (delta <= config_.max_image_stamp_delta_sec) {
+  bool validateImageStamps(const Image& depth, const Image& mask,
+                           const Image& color) {
+    const double depth_mask_delta =
+        stampDeltaSec(depth.header.stamp, mask.header.stamp);
+    const double depth_color_delta =
+        stampDeltaSec(depth.header.stamp, color.header.stamp);
+    const double max_delta = std::max(depth_mask_delta, depth_color_delta);
+    if (max_delta <= config_.max_image_stamp_delta_sec) {
       return true;
     }
     RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 2000,
-        "dropping depth/mask frame with stamp mismatch %.6fs, limit %.6fs",
-        delta, config_.max_image_stamp_delta_sec);
+        "dropping depth/mask/color frame with stamp mismatch: depth-mask %.6fs, "
+        "depth-color %.6fs, limit %.6fs",
+        depth_mask_delta, depth_color_delta, config_.max_image_stamp_delta_sec);
     return false;
   }
 
@@ -575,13 +632,15 @@ class TsdfOnlyNode : public rclcpp::Node {
             lookup.reason.c_str());
         continue;
       }
-      integrateFrameWithPose(*frame.depth, *frame.mask, lookup.pose);
+      integrateFrameWithPose(*frame.depth, *frame.mask, *frame.color,
+                             lookup.pose);
     }
   }
 
   void integrateFrameWithPose(const Image& depth, const Image& mask,
+                              const Image& color,
                               const nvblox::Transform& T_L_C) {
-    const IntegrationStats stats = fillNvbloxImages(depth, mask);
+    const IntegrationStats stats = fillNvbloxImages(depth, mask, color);
 
     const nvblox::MonoImageConstView mask_view(mask_image_);
     const nvblox::MaskedDepthImageConstView depth_view(
@@ -589,6 +648,7 @@ class TsdfOnlyNode : public rclcpp::Node {
         std::optional<nvblox::ImageView<const uint8_t>>(mask_view),
         nvblox::MaskMode::kInverted);
     mapper_->integrateDepth(depth_view, T_L_C, camera_);
+    mapper_->integrateColor(color_image_, color_depth_image_, T_L_C, camera_);
 
     last_stamp_ = depth.header.stamp;
     have_input_ = true;
@@ -597,23 +657,35 @@ class TsdfOnlyNode : public rclcpp::Node {
     RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 5000,
         "integrated frame %zu: active_depth=%zu/%zu, masked=%zu, range=%zu, "
-        "tsdf_blocks=%zu",
+        "tsdf_blocks=%zu, color_blocks=%zu",
         integrated_frames_, stats.active_depth_pixels, stats.candidate_pixels,
         stats.masked_pixels, stats.range_filtered_pixels,
-        static_cast<size_t>(mapper_->tsdf_layer().numBlocks()));
+        static_cast<size_t>(mapper_->tsdf_layer().numBlocks()),
+        static_cast<size_t>(mapper_->color_layer().numBlocks()));
   }
 
-  IntegrationStats fillNvbloxImages(const Image& depth, const Image& mask) {
+  IntegrationStats fillNvbloxImages(const Image& depth, const Image& mask,
+                                    const Image& color) {
     if (depth_image_.rows() != static_cast<int>(depth.height) ||
         depth_image_.cols() != static_cast<int>(depth.width)) {
       depth_image_.resizeAsync(depth.height, depth.width, cuda_stream_);
+      color_depth_image_.resizeAsync(depth.height, depth.width, cuda_stream_);
       mask_image_.resizeAsync(mask.height, mask.width, cuda_stream_);
+      color_image_.resizeAsync(color.height, color.width, cuda_stream_);
       cuda_stream_.synchronize();
     }
 
     IntegrationStats stats;
     const bool depth_is_float =
         depth.encoding == sensor_msgs::image_encodings::TYPE_32FC1;
+    const bool color_is_bgr =
+        color.encoding == sensor_msgs::image_encodings::BGR8 ||
+        color.encoding == sensor_msgs::image_encodings::BGRA8;
+    const size_t color_channels =
+        color.encoding == sensor_msgs::image_encodings::RGB8 ||
+                color.encoding == sensor_msgs::image_encodings::BGR8
+            ? 3U
+            : 4U;
     const size_t depth_pixel_size =
         depth_is_float ? sizeof(float) : sizeof(uint16_t);
 
@@ -628,6 +700,14 @@ class TsdfOnlyNode : public rclcpp::Node {
         if (is_robot) {
           ++stats.masked_pixels;
         }
+
+        const uint8_t* color_ptr =
+            color.data.data() + static_cast<size_t>(v) * color.step +
+            static_cast<size_t>(u) * color_channels;
+        color_image_(v, u) =
+            nvblox::Color(color_is_bgr ? color_ptr[2] : color_ptr[0],
+                          color_ptr[1],
+                          color_is_bgr ? color_ptr[0] : color_ptr[2]);
 
         const uint8_t* depth_ptr =
             depth.data.data() + static_cast<size_t>(v) * depth.step +
@@ -645,6 +725,7 @@ class TsdfOnlyNode : public rclcpp::Node {
           ++stats.active_depth_pixels;
         }
         depth_image_(v, u) = depth_m;
+        color_depth_image_(v, u) = is_robot ? 0.0f : depth_m;
       }
     }
     return stats;
@@ -671,8 +752,9 @@ class TsdfOnlyNode : public rclcpp::Node {
 
     sensor_msgs::PointCloud2Modifier modifier(cloud);
     modifier.setPointCloud2Fields(
-        5, "x", 1, sensor_msgs::msg::PointField::FLOAT32, "y", 1,
+        6, "x", 1, sensor_msgs::msg::PointField::FLOAT32, "y", 1,
         sensor_msgs::msg::PointField::FLOAT32, "z", 1,
+        sensor_msgs::msg::PointField::FLOAT32, "rgb", 1,
         sensor_msgs::msg::PointField::FLOAT32, "intensity", 1,
         sensor_msgs::msg::PointField::FLOAT32, "weight", 1,
         sensor_msgs::msg::PointField::FLOAT32);
@@ -681,17 +763,20 @@ class TsdfOnlyNode : public rclcpp::Node {
     sensor_msgs::PointCloud2Iterator<float> x_it(cloud, "x");
     sensor_msgs::PointCloud2Iterator<float> y_it(cloud, "y");
     sensor_msgs::PointCloud2Iterator<float> z_it(cloud, "z");
+    sensor_msgs::PointCloud2Iterator<float> rgb_it(cloud, "rgb");
     sensor_msgs::PointCloud2Iterator<float> intensity_it(cloud, "intensity");
     sensor_msgs::PointCloud2Iterator<float> weight_it(cloud, "weight");
     for (const SurfacePoint& point : points) {
       *x_it = point.x;
       *y_it = point.y;
       *z_it = point.z;
+      *rgb_it = packRgbAsFloat(point.color);
       *intensity_it = point.distance;
       *weight_it = point.weight;
       ++x_it;
       ++y_it;
       ++z_it;
+      ++rgb_it;
       ++intensity_it;
       ++weight_it;
     }
@@ -702,6 +787,7 @@ class TsdfOnlyNode : public rclcpp::Node {
   void collectSurfacePoints(std::vector<SurfacePoint>* points) const {
     CHECK_NOTNULL(points);
     const nvblox::TsdfLayer& layer = mapper_->tsdf_layer();
+    const nvblox::ColorLayer& color_layer = mapper_->color_layer();
     const float block_size = layer.block_size();
     const float voxel_size = layer.voxel_size();
     const float max_surface_distance =
@@ -717,6 +803,8 @@ class TsdfOnlyNode : public rclcpp::Node {
       if (block == nullptr) {
         continue;
       }
+      const nvblox::ColorBlock::ConstPtr color_block =
+          color_layer.getBlockAtIndex(block_index);
       for (int x = 0; x < kVoxelsPerSide; ++x) {
         for (int y = 0; y < kVoxelsPerSide; ++y) {
           for (int z = 0; z < kVoxelsPerSide; ++z) {
@@ -729,9 +817,18 @@ class TsdfOnlyNode : public rclcpp::Node {
             const nvblox::Vector3f position =
                 nvblox::getCenterPositionFromBlockIndexAndVoxelIndex(
                     block_size, block_index, voxel_index);
+            nvblox::Color color = nvblox::Color::Gray();
+            float color_weight = 0.0f;
+            if (color_block != nullptr) {
+              const nvblox::ColorVoxel& color_voxel = (*color_block)(voxel_index);
+              color_weight = color_voxel.weight;
+              if (color_weight >= config_.min_color_weight) {
+                color = color_voxel.color;
+              }
+            }
             points->push_back(SurfacePoint{
-                position.x(), position.y(), position.z(), voxel.distance,
-                voxel.weight});
+                position.x(), position.y(), position.z(), color, color_weight,
+                voxel.distance, voxel.weight});
           }
         }
       }
@@ -882,10 +979,13 @@ class TsdfOnlyNode : public rclcpp::Node {
   nvblox::Camera camera_;
   nvblox::CudaStreamOwning cuda_stream_;
   nvblox::DepthImage depth_image_{nvblox::MemoryType::kUnified};
+  nvblox::DepthImage color_depth_image_{nvblox::MemoryType::kUnified};
+  nvblox::ColorImage color_image_{nvblox::MemoryType::kUnified};
   nvblox::MonoImage mask_image_{nvblox::MemoryType::kUnified};
 
   message_filters::Subscriber<Image> depth_sub_;
   message_filters::Subscriber<Image> mask_sub_;
+  message_filters::Subscriber<Image> color_sub_;
   std::unique_ptr<Sync> sync_;
   rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr tf_sub_;
   rclcpp::Publisher<PointCloud2>::SharedPtr tsdf_pub_;
@@ -904,8 +1004,8 @@ class TsdfOnlyNode : public rclcpp::Node {
 
 int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
-  auto node = std::make_shared<nvblox_ros::TsdfOnlyNode>(rclcpp::NodeOptions());
-  std::weak_ptr<nvblox_ros::TsdfOnlyNode> weak_node = node;
+  auto node = std::make_shared<nvblox_ros::ColorTsdfNode>(rclcpp::NodeOptions());
+  std::weak_ptr<nvblox_ros::ColorTsdfNode> weak_node = node;
   rclcpp::on_shutdown([weak_node]() {
     if (const auto node = weak_node.lock()) {
       node->saveMapIfRequested();

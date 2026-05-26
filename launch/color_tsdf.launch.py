@@ -26,21 +26,21 @@ def generate_launch_description():
     use_rviz = LaunchConfiguration("use_rviz")
 
     default_config = source_package_path(
-        "config", "galbot_home_head_front_left_tsdf.yaml"
+        "config", "galbot_home_head_front_left_color_tsdf.yaml"
     )
-    default_rviz = source_package_path("rviz", "tsdf_only.rviz")
+    default_rviz = source_package_path("rviz", "color_tsdf.rviz")
 
     return LaunchDescription(
         [
             DeclareLaunchArgument(
                 "config_path",
                 default_value=default_config,
-                description="Path to the TSDF-only nvblox parameter file.",
+                description="Path to the color TSDF nvblox parameter file.",
             ),
             DeclareLaunchArgument(
                 "use_rviz",
                 default_value="true",
-                description="Start rviz2 with the TSDF surface cloud display.",
+                description="Start rviz2 with the color TSDF surface cloud display.",
             ),
             DeclareLaunchArgument(
                 "rviz_config",
@@ -49,8 +49,8 @@ def generate_launch_description():
             ),
             Node(
                 package="nvblox_ros",
-                executable="tsdf_only_node",
-                name="tsdf_only_node",
+                executable="color_tsdf_node",
+                name="color_tsdf_node",
                 output="screen",
                 parameters=[config_path],
             ),
@@ -58,7 +58,7 @@ def generate_launch_description():
                 condition=IfCondition(use_rviz),
                 package="rviz2",
                 executable="rviz2",
-                name="nvblox_tsdf_rviz",
+                name="nvblox_color_tsdf_rviz",
                 arguments=["-d", rviz_config],
                 output="screen",
             ),

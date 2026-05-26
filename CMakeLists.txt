@@ -16,6 +16,9 @@ if(NOT spdlog_DIR AND EXISTS "/usr/lib/x86_64-linux-gnu/cmake/spdlog/spdlogConfi
   set(spdlog_DIR "/usr/lib/x86_64-linux-gnu/cmake/spdlog" CACHE PATH "" FORCE)
 endif()
 find_package(spdlog REQUIRED)
+find_package(CUDAToolkit REQUIRED)
+find_package(gflags REQUIRED)
+find_package(glog REQUIRED)
 find_package(message_filters REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -52,7 +55,16 @@ ament_target_dependencies(
   message_filters
   tf2_msgs)
 
-install(TARGETS tsdf_only_node RUNTIME DESTINATION lib/${PROJECT_NAME})
+add_executable(color_tsdf_node src/color_tsdf_node.cpp)
+target_link_libraries(color_tsdf_node ${NVBLOX_CORE_TARGET})
+ament_target_dependencies(
+  color_tsdf_node
+  rclcpp
+  sensor_msgs
+  message_filters
+  tf2_msgs)
+
+install(TARGETS tsdf_only_node color_tsdf_node RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY config launch rviz DESTINATION share/${PROJECT_NAME})
 
 ament_package()

@@ -65,7 +65,7 @@ Visualization Manager:
       Channel Name: intensity
       Class: rviz_default_plugins/PointCloud2
       Color: 255; 255; 255
-      Color Transformer: AxisColor
+      Color Transformer: RGB8
       Decay Time: 0
       Enabled: true
       Invert Rainbow: false
@@ -73,7 +73,7 @@ Visualization Manager:
       Max Intensity: 1
       Min Color: 52; 101; 164
       Min Intensity: -1
-      Name: TSDF Surface
+      Name: Color TSDF Surface
       Position Transformer: XYZ
       Selectable: true
       Size (Pixels): 3
@@ -84,7 +84,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /nvblox_tsdf/surface_points
+        Value: /nvblox_color_tsdf/surface_points
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
